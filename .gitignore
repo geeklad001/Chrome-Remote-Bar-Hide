@@ -1,0 +1,7 @@
+bin/
+obj/
+.appdata/
+.nuget/
+publish/
+dist/
+.publish-nuget.config
