@@ -44,6 +44,7 @@ internal sealed class BarController : IDisposable
     private readonly ToolStripMenuItem _modeItem;
     private readonly ToolStripMenuItem _hotkeyItem;
     private readonly HashSet<int> _registeredHotkeys = [];
+    private readonly HashSet<IntPtr> _reportedHideFailures = [];
     private BarMode _mode = BarMode.AutoHide;
     private int _lastMatchCount = -1;
     private string _restoreHotkeyName = "Ctrl+Alt+R";
@@ -202,7 +203,7 @@ internal sealed class BarController : IDisposable
             {
                 if (_mode == BarMode.AutoHide)
                 {
-                    NativeMethods.ShowWindow(hwnd, NativeMethods.SW_HIDE);
+                    HideWindow(hwnd);
                     continue;
                 }
 
@@ -219,6 +220,29 @@ internal sealed class BarController : IDisposable
         {
             Diagnostics.Log($"Window scan exception: {ex}");
         }
+    }
+
+    private void HideWindow(IntPtr hwnd)
+    {
+        NativeMethods.ShowWindow(hwnd, NativeMethods.SW_HIDE);
+        if (NativeMethods.IsWindowVisible(hwnd))
+        {
+            NativeMethods.SetWindowPos(
+                hwnd,
+                IntPtr.Zero,
+                0,
+                0,
+                0,
+                0,
+                NativeMethods.SWP_NOACTIVATE |
+                NativeMethods.SWP_NOMOVE |
+                NativeMethods.SWP_NOSIZE |
+                NativeMethods.SWP_NOZORDER |
+                NativeMethods.SWP_HIDEWINDOW);
+        }
+
+        if (NativeMethods.IsWindowVisible(hwnd) && _reportedHideFailures.Add(hwnd))
+            Diagnostics.Log($"Matched sharing bar but could not hide it: {DescribeWindow(hwnd)}");
     }
 
     private void ShowMatchingWindows()
@@ -293,6 +317,9 @@ internal sealed class BarController : IDisposable
         if (width <= 0 || height <= 0 || width > 900 || height > 320)
             return false;
 
+        if (HasChromeRemoteDesktopControls(hwnd))
+            return true;
+
         var text = GetWindowTreeText(hwnd).ToLowerInvariant();
         var status = text.Contains("共用電腦", StringComparison.Ordinal) ||
                      text.Contains("共享电脑", StringComparison.Ordinal) ||
@@ -315,6 +342,42 @@ internal sealed class BarController : IDisposable
         // Remote support uses a Stop Sharing button; remote access can show a
         // continuation prompt instead, so both are valid sharing indicators.
         return status && (stop || continueSharing);
+    }
+
+    private static bool HasChromeRemoteDesktopControls(IntPtr hwnd)
+    {
+        var hasSharingText = false;
+        var hasAction = false;
+        NativeMethods.EnumChildWindows(hwnd, (child, _) =>
+        {
+            switch (NativeMethods.GetDlgCtrlID(child))
+            {
+                case 1002: // IDC_DISCONNECT_SHARINGWITH
+                    hasSharingText = true;
+                    break;
+                case 1001: // IDC_DISCONNECT
+                case 1005: // IDC_CONTINUE_BUTTON / IDC_CONTINUE_DEFAULT
+                case 1007: // IDC_CONTINUE_CANCEL
+                    hasAction = true;
+                    break;
+            }
+
+            return !(hasSharingText && hasAction);
+        }, IntPtr.Zero);
+        return hasSharingText && hasAction;
+    }
+
+    private static string DescribeWindow(IntPtr hwnd)
+    {
+        NativeMethods.GetWindowThreadProcessId(hwnd, out var processId);
+        try
+        {
+            return $"hwnd=0x{hwnd.ToInt64():X}; class={NativeMethods.GetClassName(hwnd)}; process={Process.GetProcessById((int)processId).ProcessName}; pid={processId}";
+        }
+        catch
+        {
+            return $"hwnd=0x{hwnd.ToInt64():X}; class={NativeMethods.GetClassName(hwnd)}; pid={processId}";
+        }
     }
 
     private static string GetWindowTreeText(IntPtr hwnd)
@@ -413,7 +476,11 @@ internal static class NativeMethods
     internal const int SW_HIDE = 0;
     internal const int SW_SHOWNOACTIVATE = 4;
     internal const uint SWP_NOACTIVATE = 0x0010;
+    internal const uint SWP_NOSIZE = 0x0001;
+    internal const uint SWP_NOMOVE = 0x0002;
+    internal const uint SWP_NOZORDER = 0x0004;
     internal const uint SWP_SHOWWINDOW = 0x0040;
+    internal const uint SWP_HIDEWINDOW = 0x0080;
     internal static readonly IntPtr HWND_TOPMOST = new(-1);
 
     internal delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
@@ -437,6 +504,16 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    internal static extern int GetDlgCtrlID(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    internal static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
