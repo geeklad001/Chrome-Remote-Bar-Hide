@@ -46,6 +46,7 @@ internal sealed class BarController : IDisposable
     private readonly HashSet<int> _registeredHotkeys = [];
     private BarMode _mode = BarMode.AutoHide;
     private int _lastMatchCount = -1;
+    private string _restoreHotkeyName = "Ctrl+Alt+R";
     private bool _disposed;
 
     public BarController()
@@ -90,24 +91,32 @@ internal sealed class BarController : IDisposable
     {
         const uint controlAlt = NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT;
         Register(HotkeyHide, controlAlt, Keys.H, "Ctrl+Alt+H");
-        Register(HotkeyRestore, controlAlt, Keys.R, "Ctrl+Alt+R");
+        if (!Register(HotkeyRestore, controlAlt, Keys.R, "Ctrl+Alt+R"))
+        {
+            const uint controlAltShift = controlAlt | NativeMethods.MOD_SHIFT;
+            if (Register(HotkeyRestore, controlAltShift, Keys.R, "Ctrl+Alt+Shift+R"))
+            {
+                _restoreHotkeyName = "Ctrl+Alt+Shift+R";
+                Diagnostics.Log("Ctrl+Alt+R was unavailable; using fallback Ctrl+Alt+Shift+R");
+            }
+        }
         Register(HotkeyTop, controlAlt, Keys.T, "Ctrl+Alt+T");
         Register(HotkeyBottom, controlAlt, Keys.B, "Ctrl+Alt+B");
         Register(HotkeyLeft, controlAlt, Keys.L, "Ctrl+Alt+L");
         Register(HotkeyRight, controlAlt, Keys.K, "Ctrl+Alt+K");
     }
 
-    private void Register(int id, uint modifiers, Keys key, string name)
+    private bool Register(int id, uint modifiers, Keys key, string name)
     {
         if (NativeMethods.RegisterHotKey(_hotkeyWindow.Handle, id, modifiers | NativeMethods.MOD_NOREPEAT, (uint)key))
         {
             _registeredHotkeys.Add(id);
             Diagnostics.Log($"Registered hotkey {name}");
+            return true;
         }
-        else
-        {
-            Diagnostics.Log($"Failed to register hotkey {name}; Win32 error {Marshal.GetLastWin32Error()}");
-        }
+
+        Diagnostics.Log($"Failed to register hotkey {name}; Win32 error {Marshal.GetLastWin32Error()}");
+        return false;
     }
 
     private void HandleHotkey(int id)
@@ -117,7 +126,7 @@ internal sealed class BarController : IDisposable
             switch (id)
             {
                 case HotkeyHide:
-                    ToggleHide();
+                    SetMode(BarMode.AutoHide);
                     break;
                 case HotkeyRestore:
                     SetMode(BarMode.Disabled);
@@ -157,9 +166,12 @@ internal sealed class BarController : IDisposable
 
     private void UpdateHotkeyText()
     {
-        _hotkeyItem.Text = _registeredHotkeys.Count == 6
+        var status = _registeredHotkeys.Count == 6
             ? "Hotkeys: registered"
             : $"Hotkeys: {_registeredHotkeys.Count}/6 registered (see debug.log)";
+        if (_restoreHotkeyName != "Ctrl+Alt+R")
+            status += $"; restore: {_restoreHotkeyName}";
+        _hotkeyItem.Text = status;
     }
 
     private void UpdateModeText()
@@ -386,6 +398,7 @@ internal static class NativeMethods
     internal const int WM_HOTKEY = 0x0312;
     internal const uint MOD_ALT = 0x0001;
     internal const uint MOD_CONTROL = 0x0002;
+    internal const uint MOD_SHIFT = 0x0004;
     internal const uint MOD_NOREPEAT = 0x4000;
     internal const int SW_HIDE = 0;
     internal const int SW_SHOWNOACTIVATE = 4;
