@@ -34,6 +34,11 @@ ZIP 必須完整解壓縮，保留 EXE 旁邊的 DLL、deps.json 和 runtimeconf
 
 Chrome Remote Desktop 若重新建立提示視窗，工具會在下一次掃描（約 0.5 秒）重新套用模式。
 
+## 故障診斷
+
+右鍵系統匣圖示時，選單會顯示熱鍵註冊數量。若不是 `6/6`，代表某些熱鍵已被其他程式占用。
+執行期間的診斷紀錄位於 `%LOCALAPPDATA%\ChromeRemoteBarHide\debug.log`，內容只包含熱鍵註冊、例外與符合視窗數量，不會記錄帳號或畫面內容。
+
 ## 安全邊界
 
 程式以目前使用者權限執行（`asInvoker`），沒有管理員權限要求。若 Chrome Remote Desktop 以較高權限執行，Windows 可能拒絕跨完整性層級的視窗操作；這時應讓兩者以相同使用者權限執行，而不是把工具改成管理員模式。

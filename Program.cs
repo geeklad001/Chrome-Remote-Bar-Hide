@@ -10,8 +10,12 @@ internal static class Program
     private static void Main()
     {
         ApplicationConfiguration.Initialize();
+        Application.ThreadException += (_, e) => Diagnostics.Log($"UI exception: {e.Exception}");
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Diagnostics.Log($"Unhandled exception: {e.ExceptionObject}");
+        Diagnostics.Log("Starting ChromeRemoteBarHide");
         using var controller = new BarController();
         Application.Run();
+        Diagnostics.Log("Stopped ChromeRemoteBarHide");
     }
 }
 
@@ -38,12 +42,16 @@ internal sealed class BarController : IDisposable
     private readonly System.Windows.Forms.Timer _timer;
     private readonly HotkeyWindow _hotkeyWindow;
     private readonly ToolStripMenuItem _modeItem;
+    private readonly ToolStripMenuItem _hotkeyItem;
+    private readonly HashSet<int> _registeredHotkeys = [];
     private BarMode _mode = BarMode.AutoHide;
+    private int _lastMatchCount = -1;
     private bool _disposed;
 
     public BarController()
     {
         _modeItem = new ToolStripMenuItem("模式") { Enabled = false };
+        _hotkeyItem = new ToolStripMenuItem("Hotkeys: registering") { Enabled = false };
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("自動隱藏", null, (_, _) => SetMode(BarMode.AutoHide));
@@ -56,6 +64,7 @@ internal sealed class BarController : IDisposable
         menu.Items.Add("立即顯示提示", null, (_, _) => ShowMatchingWindows());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_modeItem);
+        menu.Items.Add(_hotkeyItem);
         menu.Items.Add("結束", null, (_, _) => Application.Exit());
 
         _notifyIcon = new NotifyIcon
@@ -74,46 +83,63 @@ internal sealed class BarController : IDisposable
         _timer.Tick += (_, _) => ApplyToMatchingWindows();
         _timer.Start();
         UpdateModeText();
+        UpdateHotkeyText();
     }
 
     private void RegisterHotkeys()
     {
         const uint controlAlt = NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT;
-        Register(HotkeyHide, controlAlt, Keys.H);
-        Register(HotkeyRestore, controlAlt, Keys.R);
-        Register(HotkeyTop, controlAlt, Keys.T);
-        Register(HotkeyBottom, controlAlt, Keys.B);
-        Register(HotkeyLeft, controlAlt, Keys.L);
-        Register(HotkeyRight, controlAlt, Keys.K);
+        Register(HotkeyHide, controlAlt, Keys.H, "Ctrl+Alt+H");
+        Register(HotkeyRestore, controlAlt, Keys.R, "Ctrl+Alt+R");
+        Register(HotkeyTop, controlAlt, Keys.T, "Ctrl+Alt+T");
+        Register(HotkeyBottom, controlAlt, Keys.B, "Ctrl+Alt+B");
+        Register(HotkeyLeft, controlAlt, Keys.L, "Ctrl+Alt+L");
+        Register(HotkeyRight, controlAlt, Keys.K, "Ctrl+Alt+K");
     }
 
-    private void Register(int id, uint modifiers, Keys key)
+    private void Register(int id, uint modifiers, Keys key, string name)
     {
-        NativeMethods.RegisterHotKey(_hotkeyWindow.Handle, id, (uint)modifiers, (uint)key);
+        if (NativeMethods.RegisterHotKey(_hotkeyWindow.Handle, id, modifiers | NativeMethods.MOD_NOREPEAT, (uint)key))
+        {
+            _registeredHotkeys.Add(id);
+            Diagnostics.Log($"Registered hotkey {name}");
+        }
+        else
+        {
+            Diagnostics.Log($"Failed to register hotkey {name}; Win32 error {Marshal.GetLastWin32Error()}");
+        }
     }
 
     private void HandleHotkey(int id)
     {
-        switch (id)
+        try
         {
-            case HotkeyHide:
-                ToggleHide();
-                break;
-            case HotkeyRestore:
-                SetMode(BarMode.Disabled);
-                break;
-            case HotkeyTop:
-                SetMode(BarMode.Top);
-                break;
-            case HotkeyBottom:
-                SetMode(BarMode.Bottom);
-                break;
-            case HotkeyLeft:
-                SetMode(BarMode.Left);
-                break;
-            case HotkeyRight:
-                SetMode(BarMode.Right);
-                break;
+            switch (id)
+            {
+                case HotkeyHide:
+                    ToggleHide();
+                    break;
+                case HotkeyRestore:
+                    SetMode(BarMode.Disabled);
+                    break;
+                case HotkeyTop:
+                    SetMode(BarMode.Top);
+                    break;
+                case HotkeyBottom:
+                    SetMode(BarMode.Bottom);
+                    break;
+                case HotkeyLeft:
+                    SetMode(BarMode.Left);
+                    break;
+                case HotkeyRight:
+                    SetMode(BarMode.Right);
+                    break;
+            }
+            Diagnostics.Log($"Handled hotkey id {id}; mode {_mode}");
+        }
+        catch (Exception ex)
+        {
+            Diagnostics.Log($"Hotkey handler exception: {ex}");
         }
     }
 
@@ -127,6 +153,13 @@ internal sealed class BarController : IDisposable
         _mode = mode;
         UpdateModeText();
         ApplyToMatchingWindows();
+    }
+
+    private void UpdateHotkeyText()
+    {
+        _hotkeyItem.Text = _registeredHotkeys.Count == 6
+            ? "Hotkeys: registered"
+            : $"Hotkeys: {_registeredHotkeys.Count}/6 registered (see debug.log)";
     }
 
     private void UpdateModeText()
@@ -144,21 +177,35 @@ internal sealed class BarController : IDisposable
 
     private void ApplyToMatchingWindows()
     {
-        foreach (var hwnd in FindSharingBars())
+        try
         {
-            if (_mode == BarMode.AutoHide)
+            var matches = FindSharingBars();
+            if (matches.Count != _lastMatchCount)
             {
-                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_HIDE);
-                continue;
+                _lastMatchCount = matches.Count;
+                Diagnostics.Log($"Matching sharing bars: {matches.Count}; mode {_mode}");
             }
 
-            if (_mode == BarMode.Disabled)
+            foreach (var hwnd in matches)
             {
-                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_SHOWNOACTIVATE);
-                continue;
-            }
+                if (_mode == BarMode.AutoHide)
+                {
+                    NativeMethods.ShowWindow(hwnd, NativeMethods.SW_HIDE);
+                    continue;
+                }
 
-            MoveWindow(hwnd, _mode);
+                if (_mode == BarMode.Disabled)
+                {
+                    NativeMethods.ShowWindow(hwnd, NativeMethods.SW_SHOWNOACTIVATE);
+                    continue;
+                }
+
+                MoveWindow(hwnd, _mode);
+            }
+        }
+        catch (Exception ex)
+        {
+            Diagnostics.Log($"Window scan exception: {ex}");
         }
     }
 
@@ -278,11 +325,36 @@ internal sealed class BarController : IDisposable
         _disposed = true;
         _timer.Stop();
         _timer.Dispose();
-        foreach (var id in new[] { HotkeyHide, HotkeyRestore, HotkeyTop, HotkeyBottom, HotkeyLeft, HotkeyRight })
+        foreach (var id in _registeredHotkeys)
             NativeMethods.UnregisterHotKey(_hotkeyWindow.Handle, id);
         _hotkeyWindow.Dispose();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
+    }
+}
+
+internal static class Diagnostics
+{
+    private static readonly object Gate = new();
+    private static readonly string DirectoryPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "ChromeRemoteBarHide");
+    private static readonly string LogPath = Path.Combine(DirectoryPath, "debug.log");
+
+    internal static void Log(string message)
+    {
+        try
+        {
+            lock (Gate)
+            {
+                Directory.CreateDirectory(DirectoryPath);
+                File.AppendAllText(LogPath, $"{DateTimeOffset.Now:O} {message}{Environment.NewLine}");
+            }
+        }
+        catch
+        {
+            // Diagnostics must never terminate the utility.
+        }
     }
 }
 
@@ -314,6 +386,7 @@ internal static class NativeMethods
     internal const int WM_HOTKEY = 0x0312;
     internal const uint MOD_ALT = 0x0001;
     internal const uint MOD_CONTROL = 0x0002;
+    internal const uint MOD_NOREPEAT = 0x4000;
     internal const int SW_HIDE = 0;
     internal const int SW_SHOWNOACTIVATE = 4;
     internal const uint SWP_NOACTIVATE = 0x0010;
