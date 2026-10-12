@@ -2,7 +2,7 @@
 
 這是一個 Windows 系統匣工具，用來隱藏或重新定位 Chrome Remote Desktop「你目前正與 ... 共用電腦」提示。
 
-它使用 `EnumWindows`、`ShowWindow` 和 `SetWindowPos`，只處理同時包含分享狀態文字及 `Stop Sharing`/`停止共用` 按鈕文字的小型提示視窗。它不注入 `chrome.exe`、不修改 Chrome 檔案，也不會停止 Chrome Remote Desktop 服務。
+它使用 `EnumWindows`、`ShowWindow` 和 `SetWindowPos`，只處理包含 Chrome Remote Desktop 分享狀態，並帶有 `Stop Sharing`/`停止共用` 或繼續分享提示的小型視窗。它不注入 `chrome.exe`、不修改 Chrome 檔案，也不會停止 Chrome Remote Desktop 服務。
 
 ## 編譯
 

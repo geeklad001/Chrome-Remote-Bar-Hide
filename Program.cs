@@ -290,7 +290,7 @@ internal sealed class BarController : IDisposable
 
         var width = rect.Right - rect.Left;
         var height = rect.Bottom - rect.Top;
-        if (width <= 0 || height <= 0 || width > 900 || height > 140)
+        if (width <= 0 || height <= 0 || width > 900 || height > 320)
             return false;
 
         var text = GetWindowTreeText(hwnd).ToLowerInvariant();
@@ -299,12 +299,22 @@ internal sealed class BarController : IDisposable
                      text.Contains("目前正與", StringComparison.Ordinal) ||
                      text.Contains("currently shared with", StringComparison.Ordinal) ||
                      text.Contains("desktop is currently shared", StringComparison.Ordinal) ||
-                     text.Contains("your computer is currently shared", StringComparison.Ordinal);
+                     text.Contains("your computer is currently shared", StringComparison.Ordinal) ||
+                     text.Contains("currently sharing this machine", StringComparison.Ordinal) ||
+                     text.Contains("目前正在與其他使用者共用", StringComparison.Ordinal) ||
+                     text.Contains("正在與其他使用者共用", StringComparison.Ordinal);
         var stop = text.Contains("停止共用", StringComparison.Ordinal) ||
                    text.Contains("停止共享", StringComparison.Ordinal) ||
                    text.Contains("stop sharing", StringComparison.Ordinal);
+        var continueSharing = text.Contains("continue sharing", StringComparison.Ordinal) ||
+                              text.Contains("continue", StringComparison.Ordinal) ||
+                              text.Contains("繼續共用", StringComparison.Ordinal) ||
+                              text.Contains("繼續分享", StringComparison.Ordinal) ||
+                              text.Contains("繼續", StringComparison.Ordinal);
 
-        return status && stop;
+        // Remote support uses a Stop Sharing button; remote access can show a
+        // continuation prompt instead, so both are valid sharing indicators.
+        return status && (stop || continueSharing);
     }
 
     private static string GetWindowTreeText(IntPtr hwnd)
