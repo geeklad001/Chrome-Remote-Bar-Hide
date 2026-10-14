@@ -10,5 +10,9 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Platforms>AnyCPU</Platforms>
     <TargetPlatformDisplayName>Windows</TargetPlatformDisplayName>
+    <Version>0.1.5</Version>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+  </ItemGroup>
 </Project>

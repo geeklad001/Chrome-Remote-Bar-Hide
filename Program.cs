@@ -12,7 +12,9 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         Application.ThreadException += (_, e) => Diagnostics.Log($"UI exception: {e.Exception}");
         AppDomain.CurrentDomain.UnhandledException += (_, e) => Diagnostics.Log($"Unhandled exception: {e.ExceptionObject}");
-        Diagnostics.Log("Starting ChromeRemoteBarHide");
+        Diagnostics.Log($"Starting ChromeRemoteBarHide {Application.ProductVersion}; architecture={RuntimeInformation.ProcessArchitecture}");
+        using var currentProcess = Process.GetCurrentProcess();
+        Diagnostics.Log($"Controller security: pid={currentProcess.Id}; session={currentProcess.SessionId}; {ProcessDiagnostics.Describe((uint)currentProcess.Id)}");
         using var controller = new BarController();
         Application.Run();
         Diagnostics.Log("Stopped ChromeRemoteBarHide");
@@ -45,6 +47,7 @@ internal sealed class BarController : IDisposable
     private readonly ToolStripMenuItem _hotkeyItem;
     private readonly HashSet<int> _registeredHotkeys = [];
     private readonly HashSet<IntPtr> _reportedHideFailures = [];
+    private readonly HashSet<IntPtr> _observedBars = [];
     private BarMode _mode = BarMode.AutoHide;
     private int _lastMatchCount = -1;
     private string _restoreHotkeyName = "Ctrl+Alt+R";
@@ -161,6 +164,7 @@ internal sealed class BarController : IDisposable
     private void SetMode(BarMode mode)
     {
         _mode = mode;
+        _reportedHideFailures.Clear();
         UpdateModeText();
         ApplyToMatchingWindows();
     }
@@ -193,6 +197,8 @@ internal sealed class BarController : IDisposable
         try
         {
             var matches = FindSharingBars();
+            _observedBars.IntersectWith(matches);
+            _reportedHideFailures.IntersectWith(matches);
             if (matches.Count != _lastMatchCount)
             {
                 _lastMatchCount = matches.Count;
@@ -201,6 +207,9 @@ internal sealed class BarController : IDisposable
 
             foreach (var hwnd in matches)
             {
+                if (_observedBars.Add(hwnd))
+                    Diagnostics.Log($"Observed sharing bar: {DescribeWindow(hwnd)}");
+
                 if (_mode == BarMode.AutoHide)
                 {
                     HideWindow(hwnd);
@@ -224,10 +233,14 @@ internal sealed class BarController : IDisposable
 
     private void HideWindow(IntPtr hwnd)
     {
+        var visibleBefore = NativeMethods.IsWindowVisible(hwnd);
+        // ShowWindow returns the previous visibility, not a success flag.
         NativeMethods.ShowWindow(hwnd, NativeMethods.SW_HIDE);
-        if (NativeMethods.IsWindowVisible(hwnd))
+        var visibleAfterShow = NativeMethods.IsWindowVisible(hwnd);
+        var fallbackResult = "not needed";
+        if (visibleAfterShow)
         {
-            NativeMethods.SetWindowPos(
+            var succeeded = NativeMethods.SetWindowPos(
                 hwnd,
                 IntPtr.Zero,
                 0,
@@ -239,10 +252,22 @@ internal sealed class BarController : IDisposable
                 NativeMethods.SWP_NOSIZE |
                 NativeMethods.SWP_NOZORDER |
                 NativeMethods.SWP_HIDEWINDOW);
+            var error = succeeded ? 0 : Marshal.GetLastWin32Error();
+            fallbackResult = $"success={succeeded}; Win32 error={error}";
         }
 
-        if (NativeMethods.IsWindowVisible(hwnd) && _reportedHideFailures.Add(hwnd))
-            Diagnostics.Log($"Matched sharing bar but could not hide it: {DescribeWindow(hwnd)}");
+        if (!NativeMethods.IsWindow(hwnd))
+            return;
+
+        if (NativeMethods.IsWindowVisible(hwnd))
+        {
+            if (_reportedHideFailures.Add(hwnd))
+                Diagnostics.Log($"Matched sharing bar but could not hide it: before={visibleBefore}; afterShow={visibleAfterShow}; SetWindowPos {fallbackResult}; {DescribeWindow(hwnd)}");
+        }
+        else if (_reportedHideFailures.Remove(hwnd) || visibleBefore)
+        {
+            Diagnostics.Log($"Sharing bar hidden: hwnd=0x{hwnd.ToInt64():X}");
+        }
     }
 
     private void ShowMatchingWindows()
@@ -326,38 +351,37 @@ internal sealed class BarController : IDisposable
                      text.Contains("目前正與", StringComparison.Ordinal) ||
                      text.Contains("currently shared with", StringComparison.Ordinal) ||
                      text.Contains("desktop is currently shared", StringComparison.Ordinal) ||
-                     text.Contains("your computer is currently shared", StringComparison.Ordinal) ||
-                     text.Contains("currently sharing this machine", StringComparison.Ordinal) ||
-                     text.Contains("目前正在與其他使用者共用", StringComparison.Ordinal) ||
-                     text.Contains("正在與其他使用者共用", StringComparison.Ordinal);
+                     text.Contains("your computer is currently shared", StringComparison.Ordinal);
         var stop = text.Contains("停止共用", StringComparison.Ordinal) ||
                    text.Contains("停止共享", StringComparison.Ordinal) ||
                    text.Contains("stop sharing", StringComparison.Ordinal);
-        var continueSharing = text.Contains("continue sharing", StringComparison.Ordinal) ||
-                              text.Contains("continue", StringComparison.Ordinal) ||
-                              text.Contains("繼續共用", StringComparison.Ordinal) ||
-                              text.Contains("繼續分享", StringComparison.Ordinal) ||
-                              text.Contains("繼續", StringComparison.Ordinal);
-
-        // Remote support uses a Stop Sharing button; remote access can show a
-        // continuation prompt instead, so both are valid sharing indicators.
-        return status && (stop || continueSharing);
+        return status && stop;
     }
 
     private static bool HasChromeRemoteDesktopControls(IntPtr hwnd)
     {
+        NativeMethods.GetWindowThreadProcessId(hwnd, out var processId);
+        try
+        {
+            using var process = Process.GetProcessById((int)processId);
+            if (process.ProcessName is not ("remoting_desktop" or "remoting_host" or "remote_assistance_host"))
+                return false;
+        }
+        catch
+        {
+            return false;
+        }
+
         var hasSharingText = false;
         var hasAction = false;
         NativeMethods.EnumChildWindows(hwnd, (child, _) =>
         {
             switch (NativeMethods.GetDlgCtrlID(child))
             {
-                case 1002: // IDC_DISCONNECT_SHARINGWITH
+                case 1002 when NativeMethods.GetClassName(child) == "Static": // IDC_DISCONNECT_SHARINGWITH
                     hasSharingText = true;
                     break;
-                case 1001: // IDC_DISCONNECT
-                case 1005: // IDC_CONTINUE_BUTTON / IDC_CONTINUE_DEFAULT
-                case 1007: // IDC_CONTINUE_CANCEL
+                case 1001 when NativeMethods.GetClassName(child) == "Button": // IDC_DISCONNECT
                     hasAction = true;
                     break;
             }
@@ -372,7 +396,8 @@ internal sealed class BarController : IDisposable
         NativeMethods.GetWindowThreadProcessId(hwnd, out var processId);
         try
         {
-            return $"hwnd=0x{hwnd.ToInt64():X}; class={NativeMethods.GetClassName(hwnd)}; process={Process.GetProcessById((int)processId).ProcessName}; pid={processId}";
+            using var process = Process.GetProcessById((int)processId);
+            return $"hwnd=0x{hwnd.ToInt64():X}; class={NativeMethods.GetClassName(hwnd)}; process={process.ProcessName}; pid={processId}; session={process.SessionId}; {ProcessDiagnostics.Describe(processId)}";
         }
         catch
         {
